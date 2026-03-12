@@ -71,3 +71,5 @@ output_dir/
 *mixture_uniform_step=320001/
 *.out
 *.err
+
+examples/music_note_tuple/runs

@@ -1,0 +1,233 @@
+defaults:
+  - _self_
+
+compute:
+  ngpus: 1
+  nodes: 1
+  port: 12346
+
+logging:
+  log_freq: 100
+  log_lr_every: ${logging.log_freq}
+  log_file_name: stdout.log
+  enable_wandb: false
+  entity: null
+  project: flow_matching_music
+  group: null
+
+data:
+  # If null and auto_download.enabled=true, the dataset is downloaded automatically.
+  midi_dir: null
+  train_midi_dir: null
+  valid_midi_dir: null
+  valid_fraction: 0.1
+  recursive: true
+  num_workers: 4
+
+  # Automatic dataset download used when midi_dir/train_midi_dir is not provided.
+  auto_download:
+    enabled: true
+    dataset_name: pop909
+    url: https://codeload.github.com/music-x-lab/POP909-Dataset/zip/refs/heads/master
+    archive_name: pop909.zip
+    cache_root: ${oc.env:HOME}/.cache/flow_matching_music_note_tuple/datasets
+    sha256: null
+    midi_subdir: null
+    force_download: false
+    force_extract: false
+    lock_timeout_seconds: 3600
+
+  # Preprocessed note-tuple cache (built once, then reused for training).
+  preprocess_cache_dir: ${oc.env:HOME}/.cache/flow_matching_music_note_tuple/preprocessed
+  preprocess_cache_version: 1
+  rebuild_preprocess_cache: false
+  preprocess_cache_lock_timeout_seconds: 3600
+
+  beats_per_bar: 4
+  segment_bars: 8
+  segment_stride_bars: 8
+  steps_per_beat: 4
+
+  max_notes_per_segment: 512
+  dur_max_steps: 32
+  vel_bins: 8
+  num_tracks: 8
+  track_programs: [0, 0, 0, 0, 0, 0, 0, 0]
+
+  source_include_pad: true
+  default_tempo: 120.0
+
+  # Protocol-specific knobs (D3PIA POP909)
+  pop909_split_mode: deterministic_8_1_1
+  pop909_split_seed: 42
+  pop909_pitch_transpose_train: true
+  pop909_pitch_transpose_min: -5
+  pop909_pitch_transpose_max: 6
+
+training:
+  batch_size: 64
+  snapshot: 2000
+  eval_freq: 2000
+  seed: 42
+  preview:
+    enabled: true
+    sample_at_start: true
+    random_source_at_start: true
+    every_steps: 2000
+    num_samples: 2
+    batch_size: 2
+    sampling_steps: 64
+    temperature: ${flow.temperature}
+    rho_cap: ${flow.rho_cap}
+    time_epsilon: ${flow.time_epsilon}
+    final_resample: ${flow.final_resample}
+    save_musicxml: true
+    save_score_png: true
+    score_png_scale: 45
+    save_wav: true
+    soundfont_path: null
+    piano_only: true
+    track_programs_override: null
+    seed: null
+    eval:
+      enabled: true
+      protocol: ${eval.eval_protocol}
+      seed: null
+      key_labels_csv: ${eval.d3pia.key_labels_csv}
+      chord_encoder_ckpt: ${eval.d3pia.chord_encoder_ckpt}
+      beats_per_chord: ${eval.d3pia.beats_per_chord}
+      phrase_bars: ${eval.wholesonggen.phrase_bars}
+      latent_dim: ${eval.wholesonggen.latent_dim}
+      latent_encoder_ckpt_dir: ${eval.wholesonggen.latent_encoder_ckpt_dir}
+      doc_measure_bars: ${eval.wholesonggen.doc_measure_bars}
+      doc_remove_all_rest: ${eval.wholesonggen.doc_remove_all_rest}
+
+eval:
+  batch_size: 64
+  eval_protocol: d3pia_pop909  # {d3pia_pop909, wholesonggen_iclr24}
+  seed: 123
+
+  # Generic eval IO
+  out_dir: /tmp/flow_matching_music_eval
+  generated_midi_dir: null
+  reference_midi_dir: null
+  train_midi_dir: null
+  num_generate_samples: 128
+  generate_batch_size: 8
+
+  save_json: true
+  save_csv: true
+  save_table: true
+
+  # D3PIA POP909 protocol
+  d3pia:
+    key_labels_csv: null
+    chord_annotation_csv: null
+    chord_encoder_ckpt: null
+    beats_per_chord: 1
+    report_table_name: table_d3pia_pop909
+    subjective:
+      enable_package: false
+      num_excerpts: 10
+      soundfont_path: null
+      render_audio: false
+      survey_csv: null
+
+  # WholeSongGen ICLR24 protocol
+  wholesonggen:
+    phrase_bars: 8
+    full_song_bars: 32
+    short_term_bars: 8
+    latent_dim: 64
+    latent_encoder_ckpt_dir: null
+    latent_download_manifest: null
+    doc_measure_bars: 2
+    doc_remove_all_rest: true
+    report_table_name: table_wholesonggen_iclr24
+    subjective:
+      enable_package: false
+      samples_per_group: 3
+      survey_csv: null
+
+optim:
+  weight_decay: 0.03
+  optimizer: AdamW
+  lr: 3e-4
+  beta1: 0.9
+  beta2: 0.95
+  eps: 1e-8
+  warmup: 1000
+  grad_clip: 1.0
+  eta_min_ratio: 0.1
+  fused: false
+  n_iters: 200000
+  log_lr_every: ${logging.log_lr_every}
+
+flow:
+  path_type: mixture
+  source_distribution: uniform
+  loss_function: cross_entropy
+  time_epsilon: 1e-3
+
+  # Toggle optional EditFlow extension.
+  use_edit_flow: false
+
+  sampling_steps: 256
+  rho_cap: 0.95
+  temperature: 1.0
+  final_resample: true
+
+  kappa:
+    track:
+      exponent: 1.0
+      scale: 1.0
+    bar:
+      exponent: 1.0
+      scale: 1.0
+    pos:
+      exponent: 1.0
+      scale: 1.0
+    pitch:
+      exponent: 2.0
+      scale: 1.0
+    dur:
+      exponent: 1.5
+      scale: 1.0
+    vel:
+      exponent: 3.0
+      scale: 1.0
+
+  custom_path:
+    enabled: false
+    name: null
+
+  edit_flow:
+    lambda_attr: 1.0
+    lambda_insert: 1.0
+    lambda_delete: 1.0
+    lambda_substitute: 1.0
+
+    sampler: tau_leaping  # {tau_leaping, gillespie}
+    tau_leaping_step_size: 0.02
+    max_events_per_step: 64
+    rate_scale: 1.0
+    init_mode: empty  # {empty, uniform}
+
+model:
+  d_model: 512
+  n_layers: 8
+  n_heads: 8
+  ff_mult: 4
+  dropout: 0.1
+  max_seq_len: ${data.max_notes_per_segment}
+  compile: false
+  enable_edit_flow: false
+
+hydra_dir: runs
+
+hydra:
+  run:
+    dir: ${hydra_dir}/${now:%Y.%m.%d}/${now:%H%M%S}
+  sweep:
+    dir: ${hydra_dir}/${now:%Y.%m.%d}/${now:%H%M%S}
+    subdir: ${hydra.job.num}

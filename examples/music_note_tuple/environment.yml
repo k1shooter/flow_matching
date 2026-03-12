@@ -1,0 +1,23 @@
+name: discrete_flow_matching
+channels:
+  - pytorch
+  - conda-forge
+  - nvidia
+dependencies:
+  - python=3.10
+  - numpy
+  - scipy
+  - pandas
+  - pip
+  - tqdm
+  - mido
+  - pip:
+    - torch>=2.5.0
+    - hydra-core
+    - hydra-submitit-launcher
+    - omegaconf
+    - wandb
+    - pretty_midi
+    - music21
+    - pyfluidsynth
+    - flow_matching
