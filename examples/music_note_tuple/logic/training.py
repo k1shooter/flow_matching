@@ -86,6 +86,7 @@ def step(
     logger: TrainLogger,
     training: bool,
     use_edit_flow: bool,
+    parameterization: str = "posterior",
     optim_params: Optional[DictConfig] = None,
     time_epsilon: float = 0.0,
 ) -> Tensor:
@@ -129,6 +130,47 @@ def step(
                     x_t=path_sample.x_t,
                     target=x_1,
                 )
+                if (
+                    hasattr(loss_fn, "last_stats")
+                    and state.step % logger.cfg.logging.log_freq == 0
+                ):
+                    stats = getattr(loss_fn, "last_stats", {})
+                    stage = "Train" if training else "Eval"
+                    logger.info(
+                        f"[{state.step}] {stage} Edit Targets: "
+                        f"insert={stats.get('insert_mean', 0.0):.4f}, "
+                        f"delete={stats.get('delete_mean', 0.0):.4f}, "
+                        f"substitute={stats.get('substitute_mean', 0.0):.4f}, "
+                        f"active_t={stats.get('activet_mean', 0.0):.4f}, "
+                        f"active_1={stats.get('active1_mean', 0.0):.4f}"
+                    )
+            elif parameterization == "velocity":
+                velocity_output = state.model(
+                    x_t=path_sample.x_t,
+                    time=path_sample.t,
+                    attention_mask=attention_mask,
+                    return_velocity=True,
+                )
+                loss = loss_fn(
+                    velocity_output=velocity_output,
+                    x_t=path_sample.x_t,
+                    x_0=path_sample.x_0,
+                    x_1=x_1,
+                    t=path_sample.t,
+                )
+                if (
+                    hasattr(loss_fn, "last_stats")
+                    and state.step % logger.cfg.logging.log_freq == 0
+                ):
+                    stats = getattr(loss_fn, "last_stats", {})
+                    stage = "Train" if training else "Eval"
+                    logger.info(
+                        f"[{state.step}] {stage} Velocity Stats: "
+                        f"lambda_mean={stats.get('lambda_mean', 0.0):.4f}, "
+                        f"lambda_max={stats.get('lambda_max', 0.0):.4f}, "
+                        f"target_change={stats.get('target_change_mean', 0.0):.4f}, "
+                        f"lambda_hist={stats.get('lambda_hist', '')}"
+                    )
             else:
                 logits = state.model(
                     x_t=path_sample.x_t,

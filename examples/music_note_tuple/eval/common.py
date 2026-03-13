@@ -126,6 +126,7 @@ def generate_samples_to_midi_dir(
         source_distribution=cfg.flow.source_distribution,
         vocab_sizes=vocab_sizes,
         include_pad=cfg.data.source_include_pad,
+        pitch_pad_prob=getattr(cfg.flow, "source_pitch_pad_prob", None),
     )
 
     out_dir = ensure_dir(out_dir)
@@ -134,6 +135,7 @@ def generate_samples_to_midi_dir(
     saved = 0
 
     use_edit_flow = bool(getattr(cfg.flow, "use_edit_flow", False))
+    parameterization = str(getattr(cfg.flow, "parameterization", "posterior"))
 
     while remaining > 0:
         current_bs = min(batch_size, remaining)
@@ -171,6 +173,11 @@ def generate_samples_to_midi_dir(
                 temperature=float(cfg.flow.temperature),
                 rho_cap=float(cfg.flow.rho_cap),
                 final_full_resample=bool(cfg.flow.final_resample),
+                parameterization=parameterization,
+                velocity_eps=float(getattr(cfg.flow.velocity, "eps", 1e-8)),
+                velocity_corrector_weight=float(
+                    getattr(cfg.flow.velocity, "corrector_weight", 0.0)
+                ),
             )
 
         for i in range(current_bs):

@@ -5,7 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 from .transformer import Transformer
+from .velocity_head import VelocityHead
 
 __all__ = [
     "Transformer",
+    "VelocityHead",
 ]

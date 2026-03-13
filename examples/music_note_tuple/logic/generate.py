@@ -10,8 +10,10 @@ import logging
 from typing import Dict, List
 
 import torch
+import torch.nn.functional as F
 
 from data.note_tuple import ATTR_NAMES
+from samplers.ctmc_sampler import ctmc_step_note_tuple
 
 from torch import nn, Tensor
 
@@ -58,7 +60,7 @@ def _invalid_tuple_rate(x_t: Dict[str, Tensor]) -> Tensor:
 
 
 @torch.no_grad()
-def generate_samples(
+def _generate_samples_posterior(
     model: nn.Module,
     path: MixtureDiscreteNoteTuplePath,
     source_distribution: SourceDistribution,
@@ -174,6 +176,143 @@ def generate_samples(
         return intermediates
 
     return x_t
+
+
+@torch.no_grad()
+def _generate_samples_velocity(
+    model: nn.Module,
+    source_distribution: SourceDistribution,
+    sample_batch_size: int,
+    sequence_length: int,
+    sampling_steps: int,
+    device: torch.device,
+    time_epsilon: float = 1e-3,
+    velocity_eps: float = 1e-12,
+    corrector_weight: float = 0.0,
+) -> Dict[str, Tensor]:
+    x_t = source_distribution.sample(
+        batch_size=sample_batch_size,
+        sequence_length=sequence_length,
+        device=device,
+    )
+    _apply_pitch_gating_(x_t)
+
+    t_final = 1.0 - time_epsilon
+    base_h = t_final / max(1, sampling_steps)
+    t = 0.0
+    lambda_hist_total = torch.zeros(10, device=device)
+    changed_fracs = []
+
+    while t < t_final - 1e-12:
+        h = min(base_h, t_final - t)
+        t_scalar = torch.full((sample_batch_size,), t, device=device)
+        attention_mask = (x_t["pitch"] != 0).long()
+        velocity_output = model(
+            x_t=x_t,
+            time=t_scalar,
+            attention_mask=attention_mask,
+            return_velocity=True,
+        )
+
+        step_lambda = torch.cat(
+            [
+                F.softplus(velocity_output["log_lambda"][attr].reshape(-1).float())
+                for attr in ATTR_NAMES
+            ],
+            dim=0,
+        )
+        max_hist = float(step_lambda.max().item()) if step_lambda.numel() else 1.0
+        lambda_hist_total += torch.histc(
+            step_lambda,
+            bins=10,
+            min=0.0,
+            max=max(1e-6, max_hist),
+        )
+
+        x_t, step_stats = ctmc_step_note_tuple(
+            x_t=x_t,
+            token_logits=velocity_output["token_logits"],
+            log_lambda=velocity_output["log_lambda"],
+            h=h,
+            eps=velocity_eps,
+            corrector_weight=corrector_weight,
+        )
+
+        attr_changed = [
+            float(step_stats[f"{attr}_changed_frac"])
+            for attr in ATTR_NAMES
+            if f"{attr}_changed_frac" in step_stats
+        ]
+        if attr_changed:
+            changed_fracs.append(sum(attr_changed) / len(attr_changed))
+
+        t = t + h
+
+    _apply_pitch_gating_(x_t)
+    invalid_rate = _invalid_tuple_rate(x_t=x_t).item()
+    note_density = (x_t["pitch"] > 0).float().mean().item()
+    changed_mean = float(sum(changed_fracs) / max(1, len(changed_fracs)))
+
+    LOGGER.info(
+        "Velocity CTMC sampling stats: note_density=%.6f invalid_tuple_rate=%.6f "
+        "changed_frac_mean=%.6f lambda_hist=%s",
+        note_density,
+        invalid_rate,
+        changed_mean,
+        ",".join(f"{float(v):.2f}" for v in lambda_hist_total.tolist()),
+    )
+    return x_t
+
+
+@torch.no_grad()
+def generate_samples(
+    model: nn.Module,
+    path: MixtureDiscreteNoteTuplePath,
+    source_distribution: SourceDistribution,
+    sample_batch_size: int,
+    sequence_length: int,
+    sampling_steps: int,
+    device: torch.device,
+    time_epsilon: float = 1e-3,
+    temperature: float = 1.0,
+    rho_cap: float = 0.95,
+    final_full_resample: bool = True,
+    return_intermediates: bool = False,
+    parameterization: str = "posterior",
+    velocity_eps: float = 1e-12,
+    velocity_corrector_weight: float = 0.0,
+) -> Dict[str, Tensor] | List[Dict[str, Tensor]]:
+    if parameterization == "velocity":
+        if return_intermediates:
+            raise ValueError(
+                "return_intermediates=True is not supported for velocity sampling."
+            )
+        return _generate_samples_velocity(
+            model=model,
+            source_distribution=source_distribution,
+            sample_batch_size=sample_batch_size,
+            sequence_length=sequence_length,
+            sampling_steps=sampling_steps,
+            device=device,
+            time_epsilon=time_epsilon,
+            velocity_eps=velocity_eps,
+            corrector_weight=velocity_corrector_weight,
+        )
+
+    return _generate_samples_posterior(
+        model=model,
+        path=path,
+        source_distribution=source_distribution,
+        sample_batch_size=sample_batch_size,
+        sequence_length=sequence_length,
+        sampling_steps=sampling_steps,
+        device=device,
+        time_epsilon=time_epsilon,
+        temperature=temperature,
+        rho_cap=rho_cap,
+        final_full_resample=final_full_resample,
+        return_intermediates=return_intermediates,
+    )
 
 
 @torch.no_grad()

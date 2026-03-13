@@ -14,6 +14,8 @@ import torch
 import torch.nn.functional as F
 
 from data.note_tuple import ATTR_NAMES
+from losses import VelocityMatchingLoss
+from schedules import build_kappa_scheduler
 
 from torch import nn, Tensor
 
@@ -37,6 +39,9 @@ class AttributeScheduler(ABC):
     def dkappa(self, t: Tensor) -> Tensor:
         ...
 
+    def kappa_dot(self, t: Tensor) -> Tensor:
+        return self.dkappa(t=t)
+
 
 class PolynomialAttributeScheduler(AttributeScheduler):
     def __init__(self, exponent: float, scale: float = 1.0) -> None:
@@ -57,6 +62,21 @@ class PolynomialAttributeScheduler(AttributeScheduler):
         t_safe = torch.clamp(t, min=1e-8)
         dkappa = self.scale * self.exponent * torch.pow(t_safe, self.exponent - 1.0)
         return torch.clamp(dkappa, min=0.0)
+
+
+class GenericAttributeScheduler(AttributeScheduler):
+    def __init__(self, schedule: str, exponent: float, scale: float) -> None:
+        self.scheduler = build_kappa_scheduler(
+            schedule=schedule,
+            exponent=exponent,
+            scale=scale,
+        )
+
+    def kappa(self, t: Tensor) -> Tensor:
+        return self.scheduler.kappa(t=t)
+
+    def dkappa(self, t: Tensor) -> Tensor:
+        return self.scheduler.kappa_dot(t=t)
 
 
 class BaseDiscretePath(ABC):
@@ -211,6 +231,94 @@ class UniformSourceDistribution(SourceDistribution):
         return out
 
 
+class PadHeavyGatedSourceDistribution(SourceDistribution):
+    def __init__(
+        self,
+        vocab_sizes: Dict[str, int],
+        pitch_pad_prob: float,
+        include_pad: bool = True,
+    ) -> None:
+        _ = include_pad  # kept for API compatibility
+        if pitch_pad_prob < 0.0 or pitch_pad_prob > 1.0:
+            raise ValueError(f"pitch_pad_prob must be in [0,1], got {pitch_pad_prob}.")
+        self.vocab_sizes = vocab_sizes
+        self.pitch_pad_prob = float(pitch_pad_prob)
+
+    def _sample_shape(
+        self, shape: tuple[int, int], device: torch.device
+    ) -> Dict[str, Tensor]:
+        active = torch.rand(shape, device=device) >= self.pitch_pad_prob
+        out = {
+            attr: torch.zeros(shape, device=device, dtype=torch.long)
+            for attr in ATTR_NAMES
+        }
+
+        pitch_vocab = int(self.vocab_sizes["pitch"])
+        if pitch_vocab > 1:
+            pitch_vals = torch.randint(
+                low=1,
+                high=pitch_vocab,
+                size=shape,
+                device=device,
+                dtype=torch.long,
+            )
+            out["pitch"][active] = pitch_vals[active]
+
+        for attr in ATTR_NAMES:
+            if attr == "pitch":
+                continue
+            vocab = int(self.vocab_sizes[attr])
+            if vocab <= 1:
+                continue
+            vals = torch.randint(
+                low=1,
+                high=vocab,
+                size=shape,
+                device=device,
+                dtype=torch.long,
+            )
+            out[attr][active] = vals[active]
+
+        return out
+
+    def sample(
+        self,
+        batch_size: int,
+        sequence_length: int,
+        device: torch.device,
+    ) -> Dict[str, Tensor]:
+        return self._sample_shape(shape=(batch_size, sequence_length), device=device)
+
+    def sample_like(self, tensor_like: Dict[str, Tensor]) -> Dict[str, Tensor]:
+        shape = tuple(tensor_like["pitch"].shape)
+        return self._sample_shape(shape=shape, device=tensor_like["pitch"].device)
+
+
+class MaskedSourceDistribution(SourceDistribution):
+    """All-PAD source distribution (pitch=0 and all other attrs=0)."""
+
+    def sample(
+        self,
+        batch_size: int,
+        sequence_length: int,
+        device: torch.device,
+    ) -> Dict[str, Tensor]:
+        shape = (batch_size, sequence_length)
+        return {
+            attr: torch.zeros(shape, device=device, dtype=torch.long)
+            for attr in ATTR_NAMES
+        }
+
+    def sample_like(self, tensor_like: Dict[str, Tensor]) -> Dict[str, Tensor]:
+        shape = tuple(tensor_like["pitch"].shape)
+        return {
+            attr: torch.zeros(
+                shape, device=tensor_like["pitch"].device, dtype=torch.long
+            )
+            for attr in ATTR_NAMES
+        }
+
+
 class MultiAttributeCrossEntropyLoss(nn.Module):
     def __init__(self, vocab_sizes: Dict[str, int], ignore_pad: bool = False) -> None:
         super().__init__()
@@ -251,14 +359,18 @@ class MultiAttributeCrossEntropyLoss(nn.Module):
         return total
 
 
-def _get_scheduler_config_for_attribute(flow_cfg, attr: str) -> Tuple[float, float]:
+def _get_scheduler_config_for_attribute(
+    flow_cfg, attr: str
+) -> Tuple[str, float, float]:
+    default_schedule = str(getattr(flow_cfg, "kappa_schedule", "power"))
     if "kappa" not in flow_cfg or attr not in flow_cfg.kappa:
-        return 1.0, 1.0
+        return default_schedule, 1.0, 1.0
 
     attr_cfg = flow_cfg.kappa[attr]
+    schedule = str(getattr(attr_cfg, "schedule", default_schedule))
     exponent = float(getattr(attr_cfg, "exponent", 1.0))
     scale = float(getattr(attr_cfg, "scale", 1.0))
-    return exponent, scale
+    return schedule, exponent, scale
 
 
 def get_path(flow_cfg) -> BaseDiscretePath:
@@ -267,9 +379,11 @@ def get_path(flow_cfg) -> BaseDiscretePath:
     if path_type == "mixture":
         schedulers = {}
         for attr in ATTR_NAMES:
-            exponent, scale = _get_scheduler_config_for_attribute(flow_cfg, attr=attr)
-            schedulers[attr] = PolynomialAttributeScheduler(
-                exponent=exponent, scale=scale
+            schedule, exponent, scale = _get_scheduler_config_for_attribute(
+                flow_cfg, attr=attr
+            )
+            schedulers[attr] = GenericAttributeScheduler(
+                schedule=schedule, exponent=exponent, scale=scale
             )
         return MixtureDiscreteNoteTuplePath(schedulers=schedulers)
 
@@ -283,20 +397,41 @@ def get_source_distribution(
     source_distribution: str,
     vocab_sizes: Dict[str, int],
     include_pad: bool,
+    pitch_pad_prob: float | None = None,
 ) -> SourceDistribution:
-    if source_distribution != "uniform":
-        raise ValueError(
-            f"Only uniform source distribution is currently supported. Got {source_distribution}."
+    if source_distribution == "uniform":
+        return UniformSourceDistribution(
+            vocab_sizes=vocab_sizes, include_pad=include_pad
         )
 
-    return UniformSourceDistribution(vocab_sizes=vocab_sizes, include_pad=include_pad)
+    if source_distribution == "pad_heavy":
+        if pitch_pad_prob is None:
+            raise ValueError(
+                "source_distribution='pad_heavy' requires flow.source_pitch_pad_prob."
+            )
+        return PadHeavyGatedSourceDistribution(
+            vocab_sizes=vocab_sizes,
+            pitch_pad_prob=float(pitch_pad_prob),
+            include_pad=include_pad,
+        )
+
+    if source_distribution == "masked":
+        return MaskedSourceDistribution()
+
+    raise ValueError(
+        f"Unsupported source distribution: {source_distribution}. "
+        "Supported: uniform, pad_heavy, masked."
+    )
 
 
 def get_loss_function(
     loss_function: str,
     vocab_sizes: Dict[str, int],
+    path: BaseDiscretePath | None = None,
+    parameterization: str = "posterior",
     use_edit_flow: bool = False,
     edit_flow_cfg=None,
+    velocity_cfg=None,
 ) -> nn.Module:
     if loss_function != "cross_entropy":
         raise ValueError(
@@ -305,5 +440,19 @@ def get_loss_function(
 
     if use_edit_flow:
         return EditFlowLoss(vocab_sizes=vocab_sizes, cfg=edit_flow_cfg)
+
+    if parameterization == "velocity":
+        if not isinstance(path, MixtureDiscreteNoteTuplePath):
+            raise ValueError(
+                "Velocity parameterization currently requires path_type='mixture'."
+            )
+        loss_type = str(getattr(velocity_cfg, "loss_type", "bregman"))
+        eps = float(getattr(velocity_cfg, "eps", 1e-8))
+        return VelocityMatchingLoss(
+            vocab_sizes=vocab_sizes,
+            path=path,
+            loss_type=loss_type,
+            eps=eps,
+        )
 
     return MultiAttributeCrossEntropyLoss(vocab_sizes=vocab_sizes)

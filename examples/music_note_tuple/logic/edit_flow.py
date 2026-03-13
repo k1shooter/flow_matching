@@ -70,6 +70,7 @@ class EditFlowLoss(nn.Module):
         self.lambda_insert = float(getattr(cfg, "lambda_insert", 1.0))
         self.lambda_delete = float(getattr(cfg, "lambda_delete", 1.0))
         self.lambda_substitute = float(getattr(cfg, "lambda_substitute", 1.0))
+        self.last_stats: Dict[str, float] = {}
 
     def _attribute_ce(
         self,
@@ -100,6 +101,13 @@ class EditFlowLoss(nn.Module):
         target: Dict[str, Tensor],
     ) -> Tensor:
         targets = derive_edit_targets(x_t=x_t, x_1=target)
+        self.last_stats = {
+            "insert_mean": float(targets.insert.mean().item()),
+            "delete_mean": float(targets.delete.mean().item()),
+            "substitute_mean": float(targets.substitute.mean().item()),
+            "active1_mean": float((target["pitch"] != 0).float().mean().item()),
+            "activet_mean": float((x_t["pitch"] != 0).float().mean().item()),
+        }
 
         insert_loss = F.binary_cross_entropy_with_logits(
             edit_logits["insert"], targets.insert

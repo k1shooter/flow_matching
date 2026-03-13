@@ -13,7 +13,7 @@ import torch
 
 from data.data import get_vocab_sizes
 from model import Transformer
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 from torch import nn
 
 
@@ -44,6 +44,11 @@ def load_cfg_from_path(work_dir: str) -> OmegaConf:
 def load_model_from_path(work_dir: str, device: torch.device) -> nn.Module:
     root_dir, ckpt_path = _resolve_root_and_checkpoint_path(work_dir)
     cfg = load_cfg_from_path(str(root_dir))
+    with open_dict(cfg):
+        cfg.model.enable_edit_flow = bool(getattr(cfg.flow, "use_edit_flow", False))
+        cfg.model.enable_velocity = (
+            str(getattr(cfg.flow, "parameterization", "posterior")) == "velocity"
+        )
 
     vocab_sizes = get_vocab_sizes(cfg)
     model = Transformer(config=cfg.model, vocab_sizes=vocab_sizes).to(device)

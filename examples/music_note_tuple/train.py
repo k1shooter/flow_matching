@@ -436,6 +436,7 @@ def _maybe_generate_training_preview(
 
     step_dir = work_dirs.samples / f"step_{step_value:08d}"
     step_dir.mkdir(parents=True, exist_ok=True)
+    parameterization = str(getattr(cfg.flow, "parameterization", "posterior"))
     preview_track_programs = _resolve_preview_track_programs(
         cfg=cfg,
         preview_cfg=preview_cfg,
@@ -499,6 +500,11 @@ def _maybe_generate_training_preview(
                         temperature=temperature,
                         rho_cap=rho_cap,
                         final_full_resample=final_full_resample,
+                        parameterization=parameterization,
+                        velocity_eps=float(getattr(cfg.flow.velocity, "eps", 1e-8)),
+                        velocity_corrector_weight=float(
+                            getattr(cfg.flow.velocity, "corrector_weight", 0.0)
+                        ),
                     )
 
                 for i in range(current_bs):
@@ -575,15 +581,32 @@ def run_train(rank: int, cfg: OmegaConf) -> None:
     logger.log_devices(device=device, logger=logger)
 
     use_edit_flow = bool(getattr(cfg.flow, "use_edit_flow", False))
+    parameterization = str(getattr(cfg.flow, "parameterization", "posterior"))
+    if use_edit_flow and parameterization != "posterior":
+        logger.warning(
+            "EditFlow currently uses posterior parameterization. "
+            f"Overriding parameterization='{parameterization}' to 'posterior'."
+        )
+        parameterization = "posterior"
+
     with open_dict(cfg):
         cfg.model.enable_edit_flow = use_edit_flow
+        cfg.model.enable_velocity = parameterization == "velocity"
+        cfg.flow.parameterization = parameterization
 
     vocab_sizes = data.get_vocab_sizes(config=cfg)
     source_distribution = flow.get_source_distribution(
         source_distribution=cfg.flow.source_distribution,
         vocab_sizes=vocab_sizes,
         include_pad=cfg.data.source_include_pad,
+        pitch_pad_prob=getattr(cfg.flow, "source_pitch_pad_prob", None),
     )
+    if use_edit_flow and str(cfg.flow.source_distribution) == "uniform":
+        logger.warning(
+            "EditFlow + uniform source often yields near-degenerate insert labels. "
+            "Recommend flow.source_distribution=pad_heavy and "
+            "flow.source_pitch_pad_prob>=0.8."
+        )
 
     model = Transformer(config=cfg.model, vocab_sizes=vocab_sizes).to(device)
     num_parameters = sum(p.numel() for p in model.parameters())
@@ -621,8 +644,11 @@ def run_train(rank: int, cfg: OmegaConf) -> None:
     loss_fn = flow.get_loss_function(
         loss_function=cfg.flow.loss_function,
         vocab_sizes=vocab_sizes,
+        path=path,
+        parameterization=parameterization,
         use_edit_flow=use_edit_flow,
         edit_flow_cfg=cfg.flow.edit_flow,
+        velocity_cfg=getattr(cfg.flow, "velocity", None),
     )
     preview_metadata = data.get_note_tuple_metadata(config=cfg)
     sampling_model = (
@@ -674,6 +700,7 @@ def run_train(rank: int, cfg: OmegaConf) -> None:
             logger=logger,
             training=True,
             use_edit_flow=use_edit_flow,
+            parameterization=parameterization,
             time_epsilon=float(cfg.flow.time_epsilon),
         )
         train_loss_values.append(loss)
@@ -706,6 +733,7 @@ def run_train(rank: int, cfg: OmegaConf) -> None:
                 logger=logger,
                 training=False,
                 use_edit_flow=use_edit_flow,
+                parameterization=parameterization,
                 time_epsilon=float(cfg.flow.time_epsilon),
             )
             dist.all_reduce(eval_loss, dist.ReduceOp.AVG)

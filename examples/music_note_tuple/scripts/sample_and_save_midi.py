@@ -79,6 +79,7 @@ def main(args: argparse.Namespace) -> None:
         source_distribution=cfg.flow.source_distribution,
         vocab_sizes=vocab_sizes,
         include_pad=cfg.data.source_include_pad,
+        pitch_pad_prob=getattr(cfg.flow, "source_pitch_pad_prob", None),
     )
 
     sampling_steps = (
@@ -119,6 +120,7 @@ def main(args: argparse.Namespace) -> None:
     saved_score_png = 0
 
     use_edit_flow = bool(getattr(cfg.flow, "use_edit_flow", False))
+    parameterization = str(getattr(cfg.flow, "parameterization", "posterior"))
     export_musicxml = not bool(args.disable_musicxml)
     export_wav = not bool(args.disable_wav)
     export_score_png = not bool(args.disable_score_png)
@@ -159,6 +161,11 @@ def main(args: argparse.Namespace) -> None:
                 temperature=temperature,
                 rho_cap=rho_cap,
                 final_full_resample=final_full_resample,
+                parameterization=parameterization,
+                velocity_eps=float(getattr(cfg.flow.velocity, "eps", 1e-8)),
+                velocity_corrector_weight=float(
+                    getattr(cfg.flow.velocity, "corrector_weight", 0.0)
+                ),
             )
 
         for i in range(batch_size):

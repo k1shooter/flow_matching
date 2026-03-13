@@ -170,9 +170,15 @@ optim:
 
 flow:
   path_type: mixture
+  # {uniform, pad_heavy, masked}
   source_distribution: uniform
+  # Used when source_distribution=pad_heavy.
+  source_pitch_pad_prob: 0.0
+  # For EditFlow training/sampling from empty, prefer pad_heavy with >= 0.8.
   loss_function: cross_entropy
   time_epsilon: 1e-3
+  # {posterior, velocity}
+  parameterization: posterior
 
   # Toggle optional EditFlow extension.
   use_edit_flow: false
@@ -181,6 +187,8 @@ flow:
   rho_cap: 0.95
   temperature: 1.0
   final_resample: true
+  # Scheduler family for kappa(t). {power, smoothstep, cosine}
+  kappa_schedule: power
 
   kappa:
     track:
@@ -218,6 +226,13 @@ flow:
     rate_scale: 1.0
     init_mode: empty  # {empty, uniform}
 
+  velocity:
+    # {bregman, factorized}
+    loss_type: bregman
+    eps: 1e-8
+    # Optional probability-preserving corrector weight in CTMC sampling.
+    corrector_weight: 0.0
+
 model:
   d_model: 512
   n_layers: 8
@@ -227,6 +242,7 @@ model:
   max_seq_len: ${data.max_notes_per_segment}
   compile: false
   enable_edit_flow: false
+  enable_velocity: false
 
 hydra_dir: runs
 

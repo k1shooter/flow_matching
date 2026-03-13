@@ -14,6 +14,8 @@ import torch
 from data.note_tuple import ATTR_NAMES
 from torch import nn, Tensor
 
+from .velocity_head import VelocityHead
+
 
 class TimestepEmbedder(nn.Module):
     def __init__(self, output_dim: int, frequency_embedding_size: int = 256):
@@ -50,6 +52,7 @@ class Transformer(nn.Module):
         self.d_model = int(config.d_model)
         self.max_seq_len = int(config.max_seq_len)
         self.enable_edit_flow = bool(getattr(config, "enable_edit_flow", False))
+        self.enable_velocity = bool(getattr(config, "enable_velocity", False))
 
         self.attribute_embeddings = nn.ModuleDict(
             {attr: nn.Embedding(vocab_sizes[attr], self.d_model) for attr in ATTR_NAMES}
@@ -78,6 +81,9 @@ class Transformer(nn.Module):
         self.output_heads = nn.ModuleDict(
             {attr: nn.Linear(self.d_model, vocab_sizes[attr]) for attr in ATTR_NAMES}
         )
+
+        if self.enable_velocity:
+            self.velocity_head = VelocityHead(d_model=self.d_model)
 
         if self.enable_edit_flow:
             self.edit_heads = nn.ModuleDict(
@@ -124,9 +130,25 @@ class Transformer(nn.Module):
         time: Tensor,
         attention_mask: Tensor | None = None,
         return_edit_logits: bool = False,
+        return_velocity: bool = False,
     ):
+        if return_edit_logits and return_velocity:
+            raise RuntimeError(
+                "return_edit_logits and return_velocity cannot be both True."
+            )
+
         hidden = self._encode(x_t=x_t, time=time, attention_mask=attention_mask)
         logits = {attr: head(hidden) for attr, head in self.output_heads.items()}
+
+        if return_velocity:
+            if not self.enable_velocity:
+                raise RuntimeError(
+                    "return_velocity=True but model was built with enable_velocity=False"
+                )
+            return {
+                "token_logits": logits,
+                "log_lambda": self.velocity_head(hidden),
+            }
 
         if return_edit_logits:
             if not self.enable_edit_flow:
