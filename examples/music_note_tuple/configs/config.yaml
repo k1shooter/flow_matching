@@ -93,6 +93,9 @@ training:
       enabled: true
       protocol: ${eval.eval_protocol}
       seed: null
+      # Preview eval is for fast monitoring, so WholeSong protocol uses capped subsets.
+      max_generated_segments: 32
+      max_train_segments: 256
       key_labels_csv: ${eval.d3pia.key_labels_csv}
       chord_encoder_ckpt: ${eval.d3pia.chord_encoder_ckpt}
       beats_per_chord: ${eval.d3pia.beats_per_chord}
@@ -104,7 +107,9 @@ training:
 
 eval:
   batch_size: 64
-  eval_protocol: d3pia_pop909  # {d3pia_pop909, wholesonggen_iclr24}
+  # Unconditional generation defaults to WholeSongGen-style objective protocol.
+  # d3pia_pop909 is primarily aligned with conditional/reference-paired settings.
+  eval_protocol: wholesonggen_iclr24  # {d3pia_pop909, wholesonggen_iclr24}
   seed: 123
 
   # Generic eval IO

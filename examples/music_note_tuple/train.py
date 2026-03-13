@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import random
 from pathlib import Path
 from typing import List
 
@@ -191,6 +192,37 @@ def _evaluate_training_preview(
                     "skipping WholeSong preview evaluation."
                 )
                 return
+
+            # WholeSong DoC is expensive for large banks; use capped subsets for
+            # in-training previews to keep step-time bounded.
+            max_generated_segments = int(
+                getattr(preview_eval_cfg, "max_generated_segments", 32)
+            )
+            if (
+                max_generated_segments > 0
+                and len(generated_segments) > max_generated_segments
+            ):
+                rng = random.Random(eval_seed + 17)
+                pick = sorted(
+                    rng.sample(range(len(generated_segments)), max_generated_segments)
+                )
+                generated_segments = [generated_segments[i] for i in pick]
+
+            max_train_segments = int(
+                getattr(preview_eval_cfg, "max_train_segments", 256)
+            )
+            if max_train_segments > 0 and len(train_segments) > max_train_segments:
+                rng = random.Random(eval_seed + 23)
+                pick = sorted(
+                    rng.sample(range(len(train_segments)), max_train_segments)
+                )
+                train_segments = [train_segments[i] for i in pick]
+
+            logger.info(
+                "Running preview evaluation "
+                f"(protocol={protocol}, generated={len(generated_segments)}, "
+                f"train={len(train_segments)}) ..."
+            )
 
             report = evaluate_wholesong_objective(
                 generated_segments=generated_segments,

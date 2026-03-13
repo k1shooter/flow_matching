@@ -73,6 +73,10 @@ class BaseDiscretePath(ABC):
     def rho(self, attr: str, t: Tensor, h: float) -> Tensor:
         ...
 
+    def update_prob(self, attr: str, t: Tensor, h: float) -> Tensor:
+        """Return per-step update probability for [t, t+h]."""
+        return self.rho(attr=attr, t=t, h=h)
+
 
 class MixtureDiscreteNoteTuplePath(BaseDiscretePath):
     def __init__(self, schedulers: Dict[str, AttributeScheduler]) -> None:
@@ -101,17 +105,34 @@ class MixtureDiscreteNoteTuplePath(BaseDiscretePath):
 
         return MultiAttributePathSample(x_1=x_1, x_0=x_0, t=t, x_t=x_t)
 
-    def rho(self, attr: str, t: Tensor, h: float) -> Tensor:
+    def update_prob(self, attr: str, t: Tensor, h: float) -> Tensor:
+        """Exact jump probability for the mixture path over [t, t+h].
+
+        For attribute `a` with scheduler :math:`\\kappa_a(t)`, the exact update
+        probability is:
+
+        .. math::
+
+            \\rho_{\\text{exact}}(t, h)
+            = 1 - \\frac{1 - \\kappa_a(t+h)}{1 - \\kappa_a(t)}
+            = \\frac{\\kappa_a(t+h) - \\kappa_a(t)}{1 - \\kappa_a(t)}.
+        """
+        t_next = torch.clamp(t + h, min=0.0, max=1.0)
         kappa_t = self.schedulers[attr].kappa(t=t)
-        dkappa_t = self.schedulers[attr].dkappa(t=t)
+        kappa_t_next = self.schedulers[attr].kappa(t=t_next)
 
         denom = torch.clamp(1.0 - kappa_t, min=1e-8)
-        return h * dkappa_t / denom
+        rho = (kappa_t_next - kappa_t) / denom
+        return torch.clamp(rho, min=0.0, max=1.0)
+
+    def rho(self, attr: str, t: Tensor, h: float) -> Tensor:
+        # Backward-compatible alias.
+        return self.update_prob(attr=attr, t=t, h=h)
 
     def max_rho(self, t: Tensor, h: float) -> Tensor:
         max_rho = torch.zeros_like(t)
         for attr in ATTR_NAMES:
-            max_rho = torch.maximum(max_rho, self.rho(attr=attr, t=t, h=h))
+            max_rho = torch.maximum(max_rho, self.update_prob(attr=attr, t=t, h=h))
         return max_rho
 
 
@@ -198,18 +219,32 @@ class MultiAttributeCrossEntropyLoss(nn.Module):
 
     def forward(self, logits: Dict[str, Tensor], target: Dict[str, Tensor]) -> Tensor:
         total = torch.zeros((), device=next(iter(logits.values())).device)
+        active_mask = target["pitch"].reshape(-1) > 0
 
         for attr in ATTR_NAMES:
             attr_logits = logits[attr].reshape(-1, self.vocab_sizes[attr])
             attr_target = target[attr].reshape(-1)
             loss_values = F.cross_entropy(attr_logits, attr_target, reduction="none")
 
-            if self.ignore_pad:
-                valid = (attr_target != 0).float()
-                denom = valid.sum().clamp_min(1.0)
-                loss = (loss_values * valid).sum() / denom
+            if attr == "pitch":
+                if self.ignore_pad:
+                    valid = attr_target != 0
+                    if valid.any():
+                        loss = loss_values[valid].mean()
+                    else:
+                        loss = torch.zeros((), device=loss_values.device)
+                else:
+                    # Pitch learns PAD/non-PAD occupancy on all slots.
+                    loss = loss_values.mean()
             else:
-                loss = loss_values.mean()
+                # Non-pitch attributes are meaningful only on active (pitch>0) slots.
+                valid = active_mask
+                if self.ignore_pad:
+                    valid = valid & (attr_target != 0)
+                if valid.any():
+                    loss = loss_values[valid].mean()
+                else:
+                    loss = torch.zeros((), device=loss_values.device)
 
             total = total + loss
 

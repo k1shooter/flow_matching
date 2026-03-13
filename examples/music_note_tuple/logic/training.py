@@ -98,12 +98,18 @@ def step(
 
     batch = next(iterator)
     x_1 = _extract_target(batch=batch, device=device)
-    attention_mask = batch["attention_mask"].to(device)
 
     with torch.no_grad():
         x_0 = source_distribution.sample_like(x_1)
         t = torch.rand(x_1["pitch"].shape[0], device=device) * (1.0 - time_epsilon)
         path_sample = path.sample(t=t, x_0=x_0, x_1=x_1)
+        inactive = path_sample.x_t["pitch"] == 0
+        for attr in ATTR_NAMES:
+            if attr == "pitch":
+                continue
+            path_sample.x_t[attr][inactive] = 0
+        # Keep train-time masking consistent with sampling-time masking.
+        attention_mask = (path_sample.x_t["pitch"] != 0).long()
 
     ctx = nullcontext() if training else torch.no_grad()
     autocast_enabled = device.type == "cuda"
